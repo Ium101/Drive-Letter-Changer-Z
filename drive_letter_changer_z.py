@@ -7,7 +7,7 @@ CLI: pass --no-gui
 Made by Ium101
 """
 
-import os, sys, re, json, argparse, subprocess, configparser, codecs, struct
+import os, sys, re, json, argparse, subprocess, configparser, codecs, struct, time
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -101,6 +101,9 @@ _S = {
     err_bad_letter="Enter a single drive letter (A–Z).",
     err_same="Old and new letters are the same — nothing to do.",
     reason_deselected="deselected",
+    recent_tip="Recently used folders / files",
+    recent_clear="Clear recent list",
+    recent_missing="No longer exists, removed from recent list: {p}",
 ),
 "pt": dict(
     title="Drive Letter Changer Z", credit="Feito por Ium101",
@@ -140,6 +143,9 @@ _S = {
     err_bad_letter="Insira uma única letra de drive (A–Z).",
     err_same="Letra antiga e nova são iguais — nada a fazer.",
     reason_deselected="desmarcado",
+    recent_tip="Pastas / arquivos usados recentemente",
+    recent_clear="Limpar lista de recentes",
+    recent_missing="Não existe mais, removido dos recentes: {p}",
 ),
 }
 _LANG = "en"
@@ -161,6 +167,8 @@ _CONFIG_FILE   = _CONFIG_DIR / f"drive_changer_z_config_{_CONFIG_SUFFIX}.ini"
 _INI_MAIN      = "main"
 _INI_LETTERS   = "letter_map"    # old_letter -> new_letter, persisted uppercase
 _INI_OLD_PATHS = "old_path_map"  # old_letter -> old mount path (Linux only), persisted
+_INI_RECENT    = "recent"        # "0".."N" -> recently used folder/file path (newest first)
+_RECENT_MAX    = 15
 
 def load_config() -> dict:
     if _CONFIG_FILE.exists():
@@ -190,6 +198,13 @@ def load_config() -> dict:
                     return v
                 result["letter_map"] = {k.upper(): _restore_val(v)
                                         for k, v in cp.items(_INI_LETTERS)}
+            if cp.has_section(_INI_RECENT):
+                # Keys are "0", "1", ... (newest first); values keep their case.
+                def _ridx(k):
+                    return int(k) if k.isdigit() else 10**6
+                result["recent"] = [v.strip() for k, v in
+                                    sorted(cp.items(_INI_RECENT), key=lambda kv: _ridx(kv[0]))
+                                    if v.strip()][:_RECENT_MAX]
             if cp.has_section(_INI_OLD_PATHS):
                 # Keys are drive letters (uppercased); values are Linux mount paths.
                 result["old_path_map"] = {k.upper(): v.strip()
@@ -222,6 +237,9 @@ def save_config(data: dict):
         omap = data.get("old_path_map", {})
         if omap and not _IS_WINDOWS:
             cp[_INI_OLD_PATHS] = {k.lower(): v for k, v in omap.items() if v.strip()}
+        recent = data.get("recent", [])
+        if recent:
+            cp[_INI_RECENT] = {str(i): v for i, v in enumerate(recent[:_RECENT_MAX])}
         tmp = _CONFIG_FILE.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             cp.write(f)
@@ -1338,7 +1356,7 @@ def run_gui():
         QLabel, QLineEdit, QPushButton, QCheckBox, QTabWidget,
         QTreeWidget, QTreeWidgetItem, QScrollArea,
         QTextEdit, QStatusBar, QFrame, QSizePolicy, QFileDialog,
-        QMessageBox, QGroupBox
+        QMessageBox, QGroupBox, QComboBox, QStyle
     )
     from PyQt6.QtCore import Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QFont, QColor, QPalette, QTextCharFormat, QTextCursor, QIcon
@@ -1773,6 +1791,17 @@ def run_gui():
         border-radius: 5px; padding: 5px 8px; font-size: 10pt;
     }}
     QLineEdit:focus {{ border: 1px solid {ACCENT.name()}; }}
+    QComboBox {{
+        background: {BG2.name()}; color: {FG.name()}; border: 1px solid {BG3.name()};
+        border-radius: 5px; padding: 0px 4px 0px 0px; font-size: 10pt;
+    }}
+    QComboBox:focus, QComboBox:on {{ border: 1px solid {ACCENT.name()}; }}
+    QComboBox QLineEdit {{ border: none; background: transparent; }}
+    QComboBox QAbstractItemView {{
+        background: {BG2.name()}; color: {FG.name()}; border: 1px solid {BG3.name()};
+        selection-background-color: {ACCENT.name()}; selection-color: {ACCENT_TEXT.name()};
+        outline: 0;
+    }}
     QPushButton {{
         background: {BG3.name()}; color: {FG.name()}; border: none;
         border-radius: 5px; padding: 6px 14px; font-size: 10pt;
@@ -1905,6 +1934,25 @@ def run_gui():
                 self.row_ready.emit(entry)
             self.finished_ok.emit(c, s, e)
 
+    # ── Recent-items combo ────────────────────────────────────
+    class RecentCombo(QComboBox):
+        """Editable combo that remembers when its popup was last open, so a plain
+        Enter in the text field (which also emits `activated`) can be told apart
+        from an item actually picked in the dropdown."""
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.popup_open = False
+            self.popup_closed_at = 0.0
+        def showPopup(self):
+            self.popup_open = True
+            super().showPopup()
+        def hidePopup(self):
+            super().hidePopup()
+            self.popup_open = False
+            self.popup_closed_at = time.monotonic()
+        def picked_from_popup(self) -> bool:
+            return self.popup_open or (time.monotonic() - self.popup_closed_at) < 0.5
+
     # ── Main window ───────────────────────────────────────────
     class MainWindow(QMainWindow):
         def __init__(self):
@@ -1936,6 +1984,8 @@ def run_gui():
                 for k, v in self._config.get("old_path_map", {}).items()
                 if v.strip()
             }
+            # Recently used folders / files, newest first. Persisted in the .ini.
+            self._recent = [r for r in self._config.get("recent", []) if r][:_RECENT_MAX]
             self._build_ui()
             self._restore_last_folder()
 
@@ -2014,14 +2064,31 @@ def run_gui():
             fl = QHBoxLayout()
             self.lbl_folder = QLabel(T("folder_label"))
             fl.addWidget(self.lbl_folder)
-            self.entry_folder = QLineEdit()
+            # Editable combo box = the old text field + a dropdown of recent items.
+            # entry_folder stays a QLineEdit (the combo's own), so every existing
+            # .text()/.setText()/returnPressed/editingFinished use keeps working.
+            self.cmb_folder = RecentCombo()
+            self.cmb_folder.setEditable(True)
+            self.cmb_folder.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            self.cmb_folder.setCompleter(None)   # no inline auto-complete from the list
+            self.cmb_folder.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            self.cmb_folder.setMinimumContentsLength(20)
+            self.cmb_folder.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                          QSizePolicy.Policy.Fixed)
+            self.cmb_folder.setMaxVisibleItems(16)
+            self.cmb_folder.view().setTextElideMode(Qt.TextElideMode.ElideMiddle)
+            self.cmb_folder.setToolTip(T("recent_tip"))
+            self.entry_folder = self.cmb_folder.lineEdit()
             self.entry_folder.setPlaceholderText("/home/user/myfolder")
             self.entry_folder.returnPressed.connect(self._do_scan)
             # Persist the folder immediately when the user finishes editing the field,
             # so a manual path change is never overwritten by a later save that still
             # carries the old in-memory value.
             self.entry_folder.editingFinished.connect(self._save_folder_field)
-            fl.addWidget(self.entry_folder, 1)
+            fl.addWidget(self.cmb_folder, 1)
+            self.cmb_folder.activated.connect(self._on_recent_chosen)
+            self._refresh_recent_combo()
 
             self.btn_scan = QPushButton(T("scan"))
             self.btn_scan.setObjectName("accent")
@@ -2136,6 +2203,8 @@ def run_gui():
             self.setWindowTitle(T("title"))
             self.lbl_credit.setText(T("credit"))
             self.lbl_folder.setText(T("folder_label"))
+            self.cmb_folder.setToolTip(T("recent_tip"))
+            self._refresh_recent_combo()
             self.btn_scan.setText(T("scan"))
             self.btn_browse.setText(T("browse"))
             self.btn_browse_file.setText(T("browse_file"))
@@ -2424,12 +2493,85 @@ def run_gui():
                         self._saved_old_paths.pop(old_letter, None)
                 self._config["old_path_map"] = dict(self._saved_old_paths)
             self._config["last_folder"]  = self.entry_folder.text().strip()
+            self._config["recent"]       = list(self._recent)
             self._config["letter_map"]   = dict(self._saved_letter_map)
             self._config["lang"]         = _LANG
             self._config["dark_mode"]    = _dark_mode_state[0]
             self._config["recursive"]    = self.chk_recursive.isChecked()
             self._config["detect_other"] = self.chk_detect_other.isChecked()
             save_config(self._config)
+
+        # ── Recent folders / files ────────────────────────────
+        def _refresh_recent_combo(self):
+            """Rebuild the dropdown from self._recent without disturbing what the
+            user currently has typed in the field."""
+            current_text = self.entry_folder.text()
+            style = self.style()
+            ico_dir  = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+            ico_file = style.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+            self.cmb_folder.blockSignals(True)
+            self.cmb_folder.clear()
+            for path in self._recent:
+                try:
+                    icon = ico_dir if Path(path).is_dir() else ico_file
+                except OSError:
+                    icon = ico_file
+                self.cmb_folder.addItem(icon, path, path)
+                self.cmb_folder.setItemData(self.cmb_folder.count() - 1, path,
+                                            Qt.ItemDataRole.ToolTipRole)
+            if self._recent:
+                self.cmb_folder.insertSeparator(self.cmb_folder.count())
+                self.cmb_folder.addItem(T("recent_clear"), "__clear__")
+            self.cmb_folder.setCurrentIndex(-1)
+            self.cmb_folder.blockSignals(False)
+            self.entry_folder.setText(current_text)
+            self.entry_folder.setCursorPosition(0)
+
+        def _add_recent(self, path_str: str):
+            """Put a scanned folder/file at the top of the recent list (no duplicates)."""
+            path_str = str(path_str).strip()
+            if not path_str:
+                return
+            key = os.path.normcase(os.path.normpath(path_str))
+            self._recent = [r for r in self._recent
+                            if os.path.normcase(os.path.normpath(r)) != key]
+            self._recent.insert(0, path_str)
+            del self._recent[_RECENT_MAX:]
+            self._config["recent"] = list(self._recent)
+            self._refresh_recent_combo()
+
+        def _on_recent_chosen(self, index: int):
+            # Enter in the text field also emits `activated`; only react to the dropdown.
+            if not self.cmb_folder.picked_from_popup():
+                return
+            data = self.cmb_folder.itemData(index)
+            if not data:
+                return
+            if data == "__clear__":
+                self._recent = []
+                self._config["recent"] = []
+                self._refresh_recent_combo()
+                self.entry_folder.clear()
+                save_config(self._config)
+                return
+            p = Path(data)
+            try:
+                is_file, is_dir = p.is_file(), p.is_dir()
+            except OSError:
+                is_file = is_dir = False
+            if not (is_file or is_dir):
+                # Gone (drive unmounted, folder deleted…) — drop it from the list.
+                self._recent = [r for r in self._recent if r != data]
+                self._config["recent"] = list(self._recent)
+                self._refresh_recent_combo()
+                save_config(self._config)
+                self.status.showMessage(T("recent_missing", p=data))
+                return
+            self.entry_folder.setText(data)
+            if is_file:
+                self._scan_single_file(_win_longpath(p))
+            else:
+                self._do_scan()
 
         def _save_folder_field(self):
             """Immediately persist last_folder whenever the folder field loses focus
@@ -2527,6 +2669,11 @@ def run_gui():
                 self.status.showMessage(T("ready"))
 
             self.tabs.setCurrentIndex(0)
+            try:
+                if Path(str(scanned_desc)).exists():
+                    self._add_recent(str(scanned_desc))
+            except OSError:
+                pass
             self._save_current_config()
 
         def _set_all_included(self, included: bool):
