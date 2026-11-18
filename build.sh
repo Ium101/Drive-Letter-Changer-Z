@@ -462,7 +462,7 @@ write_desktop() {
 # ── System menu entry (Utilities category) ────────────────────────
 echo " Adding to system menu (Utilities)..."
 mkdir -p "$APP_DIR" 2>/dev/null || true
-write_desktop "$APP_DIR/DriveLetterChangerZ.desktop" || \
+write_desktop "$APP_DIR/Drive Letter Changer Z.desktop" || \
     echo " WARNING: Could not write system menu entry." >&2
 if command -v update-desktop-database &>/dev/null; then
     update-desktop-database "$APP_DIR" &>/dev/null || true
@@ -533,7 +533,7 @@ echo
 echo "  Script:    $PY_SCRIPT"
 echo "  Icon:      $LOCAL_ICO"
 echo "  XDG icon:  PNGs extracted into $HOME/.local/share/icons/hicolor/*/apps/drivechangerz.png"
-echo "  Menu:      $APP_DIR/DriveLetterChangerZ.desktop"
+echo "  Menu:      $APP_DIR/Drive Letter Changer Z.desktop"
 echo "  Desktop:   $DESK_FILE"
 echo "  Settings:  $SCRIPT_DIR/drive_changer_z_config_linux.ini  (created on first run)"
 echo
